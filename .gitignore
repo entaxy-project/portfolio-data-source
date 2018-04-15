@@ -1,4 +1,5 @@
 token
 node_modules
 .idea
-/.DS_Store
+*.DS_Store
+RBCDI-csv/holdings/*
