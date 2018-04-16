@@ -111,7 +111,7 @@ readToken()
         const {accounts, userId} = rawAccounts
         return Promise.map(accounts, (account) => {
           const number = account.number
-          account.number = crypto.createHash('sha1').update(account.number).digest('hex')
+          // account.number = crypto.createHash('sha1').update(account.number).digest('hex')
           return Promise
             .all([
               getPositions(questradeHost, accessToken, number),
@@ -120,8 +120,23 @@ readToken()
             ])
             .spread((positions, balances, activities) => Promise
               .resolve({
-                account,
+                account: {
+                  institution: 'questrade',
+                  uuid: uuidV4(),
+                  ...account
+                },
                 positions,
+                normalizedPositions: _.map(positions, (position) => {
+                  return {
+                    symbol: position.symbol,
+                    quantity: position.openQuantity,
+                    marketValue: position.currentMarketValue,
+                    bookValue: position.totalCost,
+                    price: position.currentPrice,
+                    averagePrice: position.averageEntryPrice,
+                    pl: position.openPnl
+                  }
+                }),
                 balances,
                 activities,
                 normalizedTransactions: _.reduce(activities, (result, activity) => {

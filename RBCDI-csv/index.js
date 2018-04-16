@@ -4,10 +4,12 @@ const _ = require('lodash')
 const path = require('path')
 const fs = require('fs')
 const csv = require('fast-csv')
+const uuidV4 = require('uuid/v4')
+const moment = require('moment')
 
-function getCSVs () {
+function getCSVs (paths) {
   return new Promise((resolve, reject) => {
-    glob('./holdings/Holdings*.csv', (err, files) => {
+    glob(paths, (err, files) => {
       if (err) {
         reject(err)
       } else {
@@ -53,6 +55,17 @@ function getHoldings (csvContent) {
   })
 }
 
+function getTransactions (csvContent) {
+  return new Promise((resolve, reject) => {
+    let transactions = []
+    csv
+      .fromString(_.trim(csvContent), {headers: true})
+      .on('data', (data) => transactions.push(data))
+      .on('end', () => resolve(transactions))
+      .on('error', (err) => reject(err))
+  })
+}
+
 function getAccountNumber (csvContent) {
   return new Promise((resolve, reject) => {
     const accountNumberRegex = /Account: (.+?)$/im
@@ -65,7 +78,52 @@ function getAccountNumber (csvContent) {
   })
 }
 
-function parseCSVFile (pathToCSV) {
+function parseActivitiesCSVFile (pathToCSV) {
+  let csvContent = fs.readFileSync(pathToCSV).toString()
+
+  const footerData = csvContent.indexOf('Disclaimer')
+  csvContent = csvContent.substr(0, footerData)
+
+  const transactionsHeaderLocation = csvContent.indexOf('Date,Activity,Symbol,Quantity,Price,Settlement Date,Account,Value,Currency,Description')
+  const transactionsData = csvContent.substr(transactionsHeaderLocation)
+
+  return Promise
+    .all([
+      getAccountNumber(csvContent),
+      getTransactions(transactionsData)
+    ])
+    .spread((accountNumber, transactions) => Promise
+      .resolve({
+        account: {
+          institution: 'rbcdi',
+          uuid: uuidV4(),
+          number: accountNumber
+        },
+        transactions,
+        normalizedTransactions: _.reduce(transactions, (result, transaction) => {
+          if (transaction.Activity !== 'Buy' && transaction.Activity !== 'Sell') {
+            return result
+          }
+          result.push({
+            id: uuidV4(),
+            source: 'rbcdi',
+            date: moment(transaction.Date, 'MMM D YYYY').toISOString(),
+            type: transaction.Activity.toLowerCase(),
+            description: _.trim(transaction.Description),
+            units: Math.abs(parseFloat(transaction.Quantity)),
+            symbol: transaction.Symbol,
+            fiatAmount: Math.abs(parseFloat(transaction.Value)),
+            fiatCurrency: transaction.Currency,
+            pricePerUnit: Math.abs(parseFloat(transaction.Price))
+          })
+          return result
+        }, [])
+      })
+    )
+
+}
+
+function parseHoldingsCSVFile (pathToCSV) {
   let csvContent = fs.readFileSync(pathToCSV).toString()
 
   const footerData = csvContent.indexOf('Important Information')
@@ -93,22 +151,57 @@ function parseCSVFile (pathToCSV) {
     .spread((accountNumber, holdings, cash, accountStats) => Promise
       .resolve({
         account: {
+          institution: 'rbcdi',
+          uuid: uuidV4(),
           number: accountNumber,
           ...accountStats
         },
         positions: holdings,
+        normalizedPositions: _.map(holdings, (holding) => {
+          const symbol = `${holding.Symbol}.${    (holding.Currency === 'CAD') ? 'TO' : 'USDPLACEHOLDER' }`
+          return {
+            symbol,
+            quantity: Math.abs(parseFloat(holding.Quantity)),
+            marketValue: Math.abs(parseFloat(holding['Total Market Value'])),
+            bookValue: Math.abs(parseFloat(holding['Total Book Cost'])),
+            price: Math.abs(parseFloat(holding['Last Price'])),
+            averagePrice: Math.abs(parseFloat(holding['Total Book Cost'])) / Math.abs(parseFloat(holding.Quantity)),
+            pl: Math.abs(parseFloat(holding['Total Market Value'])) - Math.abs(parseFloat(holding['Total Book Cost']))
+          }
+        }),
         balances: cash
       })
     )
 }
 
-getCSVs()
-  .then((files) => Promise
-    .map(files, (file) => {
-      const pathToCSV = path.join(__dirname, file)
-      return parseCSVFile(pathToCSV)
+Promise
+  .all([
+    getCSVs('./holdings/Holdings*.csv')
+      .then((files) => Promise
+        .map(files, (file) => {
+          const pathToCSV = path.join(__dirname, file)
+          return parseHoldingsCSVFile(pathToCSV)
+        })
+      ),
+    getCSVs('./holdings/Activity*.csv')
+      .then((files) => Promise
+        .map(files, (file) => {
+          const pathToCSV = path.join(__dirname, file)
+          return parseActivitiesCSVFile(pathToCSV)
+        })
+      )
+  ])
+  .spread((holdings, transactions) => {
+    const accountNumbers = _.uniq(_.flatten([
+      _.map(holdings, 'account.number'),
+      _.map(transactions, 'account.number')
+    ]))
+    return _.map(accountNumbers, (accountNumber) => {
+      const holding = _.find(holdings, (holding) => (_.get(holding, 'account.number') === accountNumber))
+      const transaction = _.find(transactions, (transaction) => (_.get(transaction, 'account.number') === accountNumber))
+      return _.merge(holding, transaction)
     })
-  )
+  })
   .then((data) => {
     console.log(JSON.stringify(data, undefined, 2))
   })
