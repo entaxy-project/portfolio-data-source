@@ -4,6 +4,10 @@ const _ = require('lodash')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const uuidV4 = require('uuid/v4')
+const moment = require('moment')
+
+fetch.Promise = Promise
 
 const tokenFile = path.join(__dirname, 'token')
 
@@ -49,6 +53,7 @@ function getPositions (questradeHost, accessToken, accountId) {
     }
   })
     .then(res => res.json())
+    .then((data) => Promise.resolve(data.positions))
 }
 
 function getBalances (questradeHost, accessToken, accountId) {
@@ -58,6 +63,38 @@ function getBalances (questradeHost, accessToken, accountId) {
     }
   })
     .then(res => res.json())
+}
+
+function getActivities (questradeHost, accessToken, accountId) {
+  const getActivitiesForDateRanges = (questradeHost, accessToken, accountId, startTime, endTime) => {
+    return fetch(`${questradeHost}v1/accounts/${accountId}/activities?startTime=${startTime}&endTime=${endTime}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+      .then(res => res.json())
+  }
+
+  // Get 4 years worth of activities
+  const monthsOfDataToFetch = 4 * 12
+  let endOfPeriod = moment().endOf('day')
+
+  const periods = []
+  _.times(monthsOfDataToFetch, () => {
+    let startOfPeriod = endOfPeriod.clone().subtract(30, 'day')
+    periods.push({
+      startOfPeriod,
+      endOfPeriod
+    })
+    endOfPeriod = startOfPeriod
+  })
+
+  return Promise
+    .map(periods, (period) => {
+      return getActivitiesForDateRanges(questradeHost, accessToken, accountId, period.startOfPeriod.toISOString(), period.endOfPeriod.toISOString())
+        .delay(50)
+    }, {concurrency: 1})
+    .then((data) => Promise.resolve(_.flatten(_.map(data, 'activities'))))
 }
 
 readToken()
@@ -78,13 +115,33 @@ readToken()
           return Promise
             .all([
               getPositions(questradeHost, accessToken, number),
-              getBalances(questradeHost, accessToken, number)
+              getBalances(questradeHost, accessToken, number),
+              getActivities(questradeHost, accessToken, number),
             ])
-            .spread((positions, balances) => Promise
+            .spread((positions, balances, activities) => Promise
               .resolve({
                 account,
                 positions,
-                balances
+                balances,
+                activities,
+                normalizedTransactions: _.reduce(activities, (result, activity) => {
+                  if (activity.type !== 'Trades') {
+                    return result
+                  }
+                  result.push({
+                    id: uuidV4(),
+                    source: 'questrade',
+                    date: activity.tradeDate,
+                    type: activity.action.toLowerCase(),
+                    description: _.trim(activity.description),
+                    units: Math.abs(activity.quantity),
+                    symbol: activity.symbol,
+                    fiatAmount: Math.abs(activity.grossAmount),
+                    fiatCurrency: activity.currency,
+                    pricePerUnit: activity.price
+                  })
+                  return result
+                }, [])
               })
             )
         })
@@ -96,4 +153,5 @@ readToken()
   .catch((err) => {
     console.warn('Error happened:')
     console.warn('Maybe try with a new token from the API dashboard?')
+    console.warn(err)
   })
